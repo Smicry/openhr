@@ -1,0 +1,31 @@
+# OpenHR Configuration
+
+# Log configuration
+log:
+  level: info  # debug, info, warn, error
+  format: text # text, json
+
+# Tool paths (usually no need to modify)
+tools:
+  mdadm: /sbin/mdadm
+  lvm: /sbin/lvm
+  parted: /sbin/parted
+
+# Storage pool default settings
+storage:
+  # Default filesystem
+  default_fs: ext4
+  
+  # Default chunk size (RAID5/6)
+  chunk_size: 512K
+  
+  # Enable bitmap
+  bitmap: true
+
+# Health check
+health:
+  # Auto check interval (minutes)
+  check_interval: 60
+  
+  # Email notification
+  notify_email: ""
