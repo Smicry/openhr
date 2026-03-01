@@ -68,21 +68,27 @@ func (c *CapacityCalculator) EstimateCapacity(disks []DiskSizeInfo, mode models.
 	}
 }
 
-// calculateSHR1 calculates SHR-1 capacity
-// 
+// calculateSHR1 calculates SHR-1 capacity using multi-layer algorithm
+//
 // SHR-1 (Synology Hybrid RAID 1) provides single disk fault tolerance
 // with optimal storage efficiency for mixed-size disks.
 //
-// How it works:
-// 1. Divides each disk into two zones: data zone and parity zone
-// 2. Data zone uses RAID 0 (striping) to maximize capacity
-// 3. Parity zone uses RAID 1 (mirroring) for redundancy
-// 4. The largest disk's capacity determines the redundancy overhead
+// Multi-layer Algorithm:
+// 1. Sort disks by size (ascending)
+// 2. Iteratively create layers:
+//   - Find disks with remaining space
+//   - Use minimum remaining as layer size
+//   - 2 disks → RAID1, 3+ disks → RAID5
+//   - Deduct allocated space from each disk
 //
-// Capacity Formula: Usable = Total - MaxDiskSize
-// Example: 4TB + 8TB + 16TB = 28TB total
-//   Usable = 28TB - 16TB (largest disk) = 12TB
-//   Parity overhead = 16TB (reserved for redundancy)
+// 3. Sum all layer capacities for total usable
+//
+// Example: 4TB + 8TB + 16TB disks
+//
+//	Layer 0: 3 disks × 4TB → RAID5 = 8TB
+//	Layer 1: 2 disks × 4TB → RAID1 = 4TB
+//	Layer 2: 1 disk × 8TB → skipped (insufficient disks)
+//	Total: 12TB
 //
 // Fault tolerance: 1 disk
 func (c *CapacityCalculator) calculateSHR1(sizes []int64, cap *models.PoolCapacity) *models.PoolCapacity {
@@ -92,50 +98,53 @@ func (c *CapacityCalculator) calculateSHR1(sizes []int64, cap *models.PoolCapaci
 		cap.Redundancy = 0
 		return cap
 	}
-
-	// SHR-1: needs n-1 data chunks + 1 parity chunk (max disk size)
-	cap.ParityCapacity = cap.MaxDiskSize
-	cap.UsableCapacity = cap.TotalRawCapacity - cap.MaxDiskSize
+	// Use the SHR planner for accurate calculation
+	usableCapacity := CalculateSHRCapacity(sizes, 1)
+	cap.UsableCapacity = usableCapacity
+	cap.ParityCapacity = cap.TotalRawCapacity - usableCapacity
 	cap.Redundancy = 1
 	cap.ProtectionLevel = "Can tolerate 1 disk failure"
-
 	return cap
 }
 
-// calculateSHR2 calculates SHR-2 capacity
+// calculateSHR2 calculates SHR-2 capacity using multi-layer algorithm
 //
 // SHR-2 (Synology Hybrid RAID 2) provides dual disk fault tolerance
 // with optimal storage efficiency for mixed-size disks.
 //
-// How it works:
-// 1. Divides each disk into two zones: data zone and parity zone  
-// 2. Data zone uses RAID 0 (striping) to maximize capacity
-// 3. Parity zone uses RAID 1 (mirroring) with 2 copies for dual redundancy
-// 4. Two times the largest disk's capacity is reserved for redundancy
+// Multi-layer Algorithm (similar to SHR-1 but with RAID6):
+// 1. Sort disks by size (ascending)
+// 2. Iteratively create layers:
+//   - Find disks with remaining space (minimum 4 required)
+//   - Use minimum remaining as layer size
+//   - Always use RAID6 for dual parity
+//   - Deduct allocated space from each disk
 //
-// Capacity Formula: Usable = Total - 2 * MaxDiskSize
-// Example: 4TB + 8TB + 16TB + 16TB = 44TB total
-//   Usable = 44TB - 32TB (2 x largest disk) = 12TB
-//   Parity overhead = 32TB (2 copies for dual fault tolerance)
+// 3. Sum all layer capacities for total usable
+//
+// Example: 4TB + 8TB + 16TB + 16TB disks
+//
+//	Layer 0: 4 disks × 4TB → RAID6 = 8TB
+//	Layer 1: 2 disks × 4TB → RAID1 = 4TB
+//	Layer 2: 1 disk × 8TB → skipped (insufficient disks)
+//	Total: 12TB
 //
 // Minimum requirement: 4 disks
 // Fault tolerance: 2 disks
 func (c *CapacityCalculator) calculateSHR2(sizes []int64, cap *models.PoolCapacity) *models.PoolCapacity {
 	n := len(sizes)
 	if n < 4 {
-		// Insufficient capacity
 		cap.UsableCapacity = 0
 		cap.Redundancy = 0
 		cap.ProtectionLevel = "Requires at least 4 disks"
 		return cap
 	}
-
-	// SHR-2: needs n-2 data chunks + 2 parity chunks (2x max disk size)
-	cap.ParityCapacity = 2 * cap.MaxDiskSize
-	cap.UsableCapacity = cap.TotalRawCapacity - 2*cap.MaxDiskSize
+	// Use the SHR planner for accurate calculation
+	usableCapacity := CalculateSHRCapacity(sizes, 2)
+	cap.UsableCapacity = usableCapacity
+	cap.ParityCapacity = cap.TotalRawCapacity - usableCapacity
 	cap.Redundancy = 2
 	cap.ProtectionLevel = "Can tolerate 2 disk failures"
-
 	return cap
 }
 
@@ -212,27 +221,27 @@ func (c *CapacityCalculator) calculateJBOD(sizes []int64, cap *models.PoolCapaci
 	return c.calculateBasic(sizes, cap)
 }
 
-// DiskSizeInfo 硬盘大小信息
+// DiskSizeInfo - Disk size information
 type DiskSizeInfo struct {
-	Device string
-	Size   int64 // 字节
-	SizeStr string // 人类可读
+	Device  string
+	Size    int64  // bytes
+	SizeStr string // human readable
 }
 
-// ParseDiskSizes 解析硬盘大小字符串
+// ParseDiskSizes - Parse disk size strings
 func ParseDiskSizes(sizes []string) []DiskSizeInfo {
 	var result []DiskSizeInfo
 	for _, s := range sizes {
 		size := parseSizeString(s)
 		result = append(result, DiskSizeInfo{
-			Size:     size,
-			SizeStr:  s,
+			Size:    size,
+			SizeStr: s,
 		})
 	}
 	return result
 }
 
-// ParseDiskSizesWithDevices 解析硬盘大小字符串（带设备）
+// ParseDiskSizesWithDevices - Parse disk size strings with devices
 func ParseDiskSizesWithDevices(devices []string, sizes []string) []DiskSizeInfo {
 	var result []DiskSizeInfo
 	for i, dev := range devices {
@@ -242,22 +251,22 @@ func ParseDiskSizesWithDevices(devices []string, sizes []string) []DiskSizeInfo 
 		}
 		size := parseSizeString(sizeStr)
 		result = append(result, DiskSizeInfo{
-			Device: dev,
-			Size:   size,
+			Device:  dev,
+			Size:    size,
 			SizeStr: sizeStr,
 		})
 	}
 	return result
 }
 
-// parseSizeString 解析大小字符串
+// parseSizeString - Parse size string
 func parseSizeString(s string) int64 {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0
 	}
 
-	// 匹配数字+单位
+	// Match number + unit
 	re := regexp.MustCompile(`^([\d.]+)\s*(B|KB|MB|GB|TB|PB|TiB|GiB|MiBi)?$`)
 	matches := re.FindStringSubmatch(strings.ToUpper(s))
 	if matches == nil {
@@ -288,7 +297,7 @@ func parseSizeString(s string) int64 {
 	return int64(value)
 }
 
-// FormatBytes 格式化字节数
+// FormatBytes - Format bytes to human readable string
 func FormatBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -302,7 +311,7 @@ func FormatBytes(bytes int64) string {
 	return fmt.Sprintf("%.2f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// ParseSizeString 解析大小字符串（供外部调用）
+// ParseSizeString - Parse size string (public API)
 func ParseSizeString(s string) int64 {
 	return parseSizeString(s)
 }

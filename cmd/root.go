@@ -30,9 +30,9 @@ Supported Storage Modes:
   - shr2:  Hybrid RAID-2 (Dual Disk Fault Tolerance)
 
 Examples:
-  openhr pool create --name mypool --mode shr1 --disks /dev/sda /dev/sdb /dev/sdc
+  openhr pool create --name mypool --mode shr1 --disks /dev/sda --disks /dev/sdb --disks /dev/sdc
   openhr pool list
-  openhr capacity estimate --disks 4TB 8TB 16TB --mode shr1`,
+  openhr capacity estimate --disks 4TB --disks 8TB --disks 16TB --mode shr1`,
 	SilenceUsage: true,
 }
 
@@ -66,7 +66,7 @@ func init() {
 func initConfig() {
 	logger.SetVerbose(verbose)
 	config.Init()
-	
+
 	if os.Geteuid() != 0 {
 		logger.Warn("Running as non-root user, some operations may fail")
 	}
@@ -93,8 +93,8 @@ func init() {
 		Long: `Create a new storage pool.
 
 Examples:
-  openhr pool create --name mypool --mode shr1 --disks /dev/sda /dev/sdb /dev/sdc
-  openhr pool create --name datapool --mode raid5 --disks /dev/sda /dev/sdb /dev/sdc`,
+  openhr pool create --name mypool --mode shr1 --disks /dev/sda --disks /dev/sdb --disks /dev/sdc
+  openhr pool create --name datapool --mode raid5 --disks /dev/sda --disks /dev/sdb --disks /dev/sdc`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if os.Geteuid() != 0 {
 				return fmt.Errorf("this operation requires root privileges")
@@ -112,14 +112,12 @@ Examples:
 			if !isValidMode(mode) {
 				return fmt.Errorf("invalid storage mode: %s", poolMode)
 			}
-
 			calc := service.NewCapacityCalculator()
 			diskSizes := make([]service.DiskSizeInfo, len(poolDisks))
 			for i := range poolDisks {
 				diskSizes[i] = service.DiskSizeInfo{Device: poolDisks[i]}
 			}
 			capacity := calc.EstimateCapacity(diskSizes, mode)
-
 			fmt.Println()
 			fmt.Println("═══════════════════════════════════════════════════════")
 			fmt.Printf("  Pool Name: %s\n", poolName)
@@ -137,16 +135,14 @@ Examples:
 			fmt.Printf("  Usable:       %s\n", service.FormatBytes(capacity.UsableCapacity))
 			fmt.Printf("  Redundancy:   %s\n", capacity.ProtectionLevel)
 			fmt.Println()
-
 			if capacity.UsableCapacity <= 0 {
 				return fmt.Errorf("insufficient usable capacity to create pool")
 			}
-
 			poolSvc := service.NewPoolService()
 			_, err := poolSvc.CreatePool(models.PoolConfig{
-				Name:    poolName,
-				Mode:    mode,
-				Disks:   poolDisks,
+				Name:     poolName,
+				Mode:     mode,
+				Disks:    poolDisks,
 				HotSpare: hotSpareDisks,
 			})
 			if err != nil {
@@ -160,8 +156,8 @@ Examples:
 	}
 	createCmd.Flags().StringVar(&poolName, "name", "", "Pool name")
 	createCmd.Flags().StringVar(&poolMode, "mode", "", "Storage mode: basic, jbod, raid1, raid5, raid6, shr1, shr2")
-	createCmd.Flags().StringSliceVar(&poolDisks, "disks", []string{}, "Disk devices (can be repeated)")
-	createCmd.Flags().StringSliceVar(&hotSpareDisks, "hot-spare", []string{}, "Hot spare disks")
+	createCmd.Flags().StringArrayVar(&poolDisks, "disks", []string{}, "Disk devices (can be repeated)")
+	createCmd.Flags().StringArrayVar(&hotSpareDisks, "hot-spare", []string{}, "Hot spare disks")
 	createCmd.MarkFlagRequired("name")
 	createCmd.MarkFlagRequired("mode")
 	createCmd.MarkFlagRequired("disks")
@@ -184,7 +180,7 @@ Examples:
 			fmt.Printf("%-20s %-10s %-10s %-12s %-12s\n", "Name", "Mode", "Status", "Total", "Free")
 			fmt.Println("────────────────────────────────────────────────────────────────")
 			for _, p := range pools {
-				fmt.Printf("%-20s %-10s %-10s %-12s %-12s\n", 
+				fmt.Printf("%-20s %-10s %-10s %-12s %-12s\n",
 					p.Name,
 					p.Mode,
 					p.Status,
@@ -301,7 +297,7 @@ Examples:
 			return nil
 		},
 	}
-	expandCmd.Flags().StringSliceVar(&poolDisks, "disks", []string{}, "Disks to add")
+	expandCmd.Flags().StringArrayVar(&poolDisks, "disks", []string{}, "Disks to add (can be repeated)")
 	expandCmd.MarkFlagRequired("disks")
 
 	poolCmd.AddCommand(createCmd)
@@ -356,7 +352,7 @@ func init() {
 				}
 				parts, _ := parted.ListPartitions(d.Device)
 				partCount := len(parts)
-				fmt.Printf("%-20s %-15s %-12s %s %d partitions\n", 
+				fmt.Printf("%-20s %-15s %-12s %s %d partitions\n",
 					d.Device,
 					truncate(d.Model, 15),
 					d.SizeHuman,
@@ -393,7 +389,7 @@ func init() {
 				fmt.Printf("  %-10s %-10s %-10s %s\n", "Number", "Size", "Type", "Filesystem")
 				fmt.Println("  ────────────────────────────────────")
 				for _, p := range disk.Partitions {
-					fmt.Printf("  %-10d %-10s %-10s %s\n", 
+					fmt.Printf("  %-10d %-10s %-10s %s\n",
 						p.Number,
 						service.FormatBytes(p.Size),
 						p.Type,
@@ -499,7 +495,7 @@ func init() {
 			for _, lv := range filtered {
 				poolName := lv.VGName[7:]
 				fs := getFilesystem(lv.Device)
-				fmt.Printf("%-20s %-15s %-12s %-10s %s\n", 
+				fmt.Printf("%-20s %-15s %-12s %-10s %s\n",
 					lv.Name,
 					poolName,
 					service.FormatBytes(lv.Size),
@@ -538,8 +534,8 @@ func init() {
 		Long: `Estimate usable capacity based on disk configuration and storage mode.
 
 Examples:
-  openhr capacity estimate --disks 4TB 8TB 16TB --mode shr1
-  openhr capacity estimate --disks 4TB 8TB 16TB --mode shr2`,
+  openhr capacity estimate --disks 4TB --disks 8TB --disks 16TB --mode shr1
+  openhr capacity estimate --disks 4TB --disks 8TB --disks 16TB --disks 16TB --mode shr2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(calcDiskSizes) == 0 {
 				return fmt.Errorf("disk sizes are required (--disks)")
@@ -551,7 +547,6 @@ Examples:
 			if !isValidMode(mode) {
 				return fmt.Errorf("invalid storage mode: %s", calcMode)
 			}
-
 			sizes := service.ParseDiskSizes(calcDiskSizes)
 			calc := service.NewCapacityCalculator()
 			capacity := calc.EstimateCapacity(sizes, mode)
@@ -589,7 +584,7 @@ Examples:
 			return nil
 		},
 	}
-	estimateCmd.Flags().StringSliceVar(&calcDiskSizes, "disks", []string{}, "Disk sizes (e.g., --disks=4TB --disks=8TB)")
+	estimateCmd.Flags().StringArrayVar(&calcDiskSizes, "disks", []string{}, "Disk sizes (can be repeated: --disks 4TB --disks 8TB)")
 	estimateCmd.Flags().StringVar(&calcMode, "mode", "", "Storage mode: basic, jbod, raid1, raid5, raid6, shr1, shr2")
 	estimateCmd.MarkFlagRequired("disks")
 	estimateCmd.MarkFlagRequired("mode")

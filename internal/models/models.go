@@ -81,10 +81,10 @@ type Volume struct {
 // RAIDInfo represents RAID array information
 type RAIDInfo struct {
 	Device        string
-	Level        int
-	State        string
+	Level         int
+	State         string
 	ActiveDevices int
-	TotalDevices int
+	TotalDevices  int
 	FailedDevices int
 	Layout        string
 	ChunkSize     string
@@ -92,7 +92,7 @@ type RAIDInfo struct {
 
 // PoolCapacity represents pool capacity information
 type PoolCapacity struct {
-	TotalRawCapacity  int64
+	TotalRawCapacity int64
 	UsableCapacity   int64
 	ParityCapacity   int64
 	UsedCapacity     int64
@@ -101,15 +101,15 @@ type PoolCapacity struct {
 	MaxDiskSize      int64
 	MinDiskSize      int64
 	Redundancy       int
-	ProtectionLevel string
+	ProtectionLevel  string
 }
 
 // PoolConfig represents pool creation configuration
 type PoolConfig struct {
-	Name      string
-	Mode      StorageMode
-	Disks     []string
-	HotSpare  []string
+	Name     string
+	Mode     StorageMode
+	Disks    []string
+	HotSpare []string
 }
 
 // GetModeDisplay returns the display name for the storage mode

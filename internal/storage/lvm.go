@@ -9,147 +9,138 @@ import (
 	"github.com/openhr/internal/models"
 )
 
-// LVMOperator LVM操作实现
+// LVMOperator - LVM operator implementation
 type LVMOperator struct {
 	executor *Executor
 }
 
-// NewLVMOperator 创建LVM操作器
+// NewLVMOperator - Creates LVM operator
 func NewLVMOperator() *LVMOperator {
 	return &LVMOperator{
 		executor: NewExecutor(),
 	}
 }
 
-// CreatePV 创建物理卷
+// CreatePV - Create physical volume
 func (l *LVMOperator) CreatePV(dev string) error {
 	if !l.executor.CheckCommandExists("lvm") {
-		return fmt.Errorf("lvm命令不可用，请安装lvm2")
+		return fmt.Errorf("lvm command not available, please install lvm2")
 	}
-
 	_, err := l.executor.Run("lvm", "pvcreate", "-y", dev)
 	if err != nil {
-		return fmt.Errorf("创建PV失败: %v", err)
+		return fmt.Errorf("failed to create PV: %v", err)
 	}
 	return nil
 }
 
-// RemovePV 移除物理卷
+// RemovePV - Remove physical volume
 func (l *LVMOperator) RemovePV(dev string) error {
 	_, err := l.executor.Run("lvm", "pvremove", "-y", "-ff", dev)
 	if err != nil {
-		return fmt.Errorf("移除PV失败: %v", err)
+		return fmt.Errorf("failed to remove PV: %v", err)
 	}
 	return nil
 }
 
-// CreateVG 创建卷组
+// CreateVG - Create volume group
 func (l *LVMOperator) CreateVG(name string, pvs []string) error {
 	args := []string{"vgcreate", name}
 	args = append(args, pvs...)
-
 	_, err := l.executor.Run("lvm", args...)
 	if err != nil {
-		return fmt.Errorf("创建VG失败: %v", err)
+		return fmt.Errorf("failed to create VG: %v", err)
 	}
 	return nil
 }
 
-// RemoveVG 移除卷组
+// RemoveVG - Remove volume group
 func (l *LVMOperator) RemoveVG(name string) error {
 	_, err := l.executor.Run("lvm", "vgremove", "-y", "-ff", name)
 	if err != nil {
-		return fmt.Errorf("移除VG失败: %v", err)
+		return fmt.Errorf("failed to remove VG: %v", err)
 	}
 	return nil
 }
 
-// ExtendVG 扩展卷组
+// ExtendVG - Extend volume group
 func (l *LVMOperator) ExtendVG(name string, pvs []string) error {
 	args := []string{"vgextend", name}
 	args = append(args, pvs...)
 
 	_, err := l.executor.Run("lvm", args...)
 	if err != nil {
-		return fmt.Errorf("扩展VG失败: %v", err)
+		return fmt.Errorf("failed to extend VG: %v", err)
 	}
 	return nil
 }
 
-// ReduceVG 缩小卷组
+// ReduceVG - Reduce volume group
 func (l *LVMOperator) ReduceVG(name string, pvs []string) error {
 	args := []string{"vgreduce", name}
 	args = append(args, pvs...)
 
 	_, err := l.executor.Run("lvm", args...)
 	if err != nil {
-		return fmt.Errorf("缩小VG失败: %v", err)
+		return fmt.Errorf("failed to reduce VG: %v", err)
 	}
 	return nil
 }
 
-// CreateLV 创建逻辑卷
+// CreateLV - Create logical volume
 func (l *LVMOperator) CreateLV(vg, name string, size int64, fs string) error {
 	sizeStr := formatSize(size)
-	
 	_, err := l.executor.Run("lvm", "lvcreate", "-L", sizeStr, "-n", name, vg)
 	if err != nil {
-		return fmt.Errorf("创建LV失败: %v", err)
+		return fmt.Errorf("failed to create LV: %v", err)
 	}
-
-	// 格式化
+	// Format
 	dev := fmt.Sprintf("/dev/%s/%s", vg, name)
 	if fs != "" {
 		_, err = l.executor.Run("mkfs."+fs, "-F", dev)
 		if err != nil {
-			return fmt.Errorf("格式化失败: %v", err)
+			return fmt.Errorf("failed to format: %v", err)
 		}
 	}
-
 	return nil
 }
 
-// RemoveLV 移除逻辑卷
+// RemoveLV - Remove logical volume
 func (l *LVMOperator) RemoveLV(vg, name string) error {
 	dev := fmt.Sprintf("/dev/%s/%s", vg, name)
 	_, err := l.executor.Run("lvm", "lvremove", "-y", "-ff", dev)
 	if err != nil {
-		return fmt.Errorf("移除LV失败: %v", err)
+		return fmt.Errorf("failed to remove LV: %v", err)
 	}
 	return nil
 }
 
-// ExtendLV 扩展逻辑卷
+// ExtendLV - Extend logical volume
 func (l *LVMOperator) ExtendLV(vg, name string, size int64) error {
 	sizeStr := formatSize(size)
 	dev := fmt.Sprintf("/dev/%s/%s", vg, name)
-
 	_, err := l.executor.Run("lvm", "lvextend", "-L", "+"+sizeStr, dev)
 	if err != nil {
-		return fmt.Errorf("扩展LV失败: %v", err)
+		return fmt.Errorf("failed to extend LV: %v", err)
 	}
-
 	return nil
 }
 
-// ReduceLV 缩小逻辑卷
+// ReduceLV - Reduce logical volume
 func (l *LVMOperator) ReduceLV(vg, name string, size int64) error {
 	sizeStr := formatSize(size)
 	dev := fmt.Sprintf("/dev/%s/%s", vg, name)
-
 	_, err := l.executor.Run("lvm", "lvreduce", "-L", "-"+sizeStr, dev)
 	if err != nil {
-		return fmt.Errorf("缩小LV失败: %v", err)
+		return fmt.Errorf("failed to reduce LV: %v", err)
 	}
-
 	return nil
 }
 
-// ListVGs 列出卷组
+// ListVGs - List volume groups
 func (l *LVMOperator) ListVGs() ([]models.VGInfo, error) {
 	output, err := l.executor.Run("lvm", "vgs", "--units", "b", "--noheadings", "-o", "vg_name,vg_size,vg_free,pv_count,lv_count,vg_uuid")
 	if err != nil {
-		return nil, fmt.Errorf("列出VG失败: %v", err)
+		return nil, fmt.Errorf("failed to list VGs: %v", err)
 	}
 
 	var vgs []models.VGInfo
@@ -178,11 +169,11 @@ func (l *LVMOperator) ListVGs() ([]models.VGInfo, error) {
 	return vgs, nil
 }
 
-// ListPVs 列出物理卷
+// ListPVs - List physical volumes
 func (l *LVMOperator) ListPVs() ([]models.PVInfo, error) {
 	output, err := l.executor.Run("lvm", "pvs", "--units", "b", "--noheadings", "-o", "pv_name,vg_name,pv_size,pv_free,dev_size,pv_uuid")
 	if err != nil {
-		return nil, fmt.Errorf("列出PV失败: %v", err)
+		return nil, fmt.Errorf("failed to list PVs: %v", err)
 	}
 
 	var pvs []models.PVInfo
@@ -211,11 +202,11 @@ func (l *LVMOperator) ListPVs() ([]models.PVInfo, error) {
 	return pvs, nil
 }
 
-// ListLVs 列出逻辑卷
+// ListLVs - List logical volumes
 func (l *LVMOperator) ListLVs() ([]models.LVInfo, error) {
 	output, err := l.executor.Run("lvm", "lvs", "--units", "b", "--noheadings", "-o", "lv_name,vg_name,lv_size,lv_pool,layout,role,device")
 	if err != nil {
-		return nil, fmt.Errorf("列出LV失败: %v", err)
+		return nil, fmt.Errorf("failed to list LVs: %v", err)
 	}
 
 	var lvs []models.LVInfo
@@ -246,16 +237,16 @@ func (l *LVMOperator) ListLVs() ([]models.LVInfo, error) {
 	return lvs, nil
 }
 
-// GetVGInfo 获取卷组信息
+// GetVGInfo - Get volume group info
 func (l *LVMOperator) GetVGInfo(name string) (*models.VGInfo, error) {
 	output, err := l.executor.Run("lvm", "vgs", "--units", "b", "--noheadings", "-o", "vg_name,vg_size,vg_free,pv_count,lv_count", name)
 	if err != nil {
-		return nil, fmt.Errorf("获取VG信息失败: %v", err)
+		return nil, fmt.Errorf("failed to get VG info: %v", err)
 	}
 
 	fields := strings.Fields(output)
 	if len(fields) < 5 {
-		return nil, fmt.Errorf("VG不存在: %s", name)
+		return nil, fmt.Errorf("VG does not exist: %s", name)
 	}
 
 	return &models.VGInfo{
@@ -267,25 +258,22 @@ func (l *LVMOperator) GetVGInfo(name string) (*models.VGInfo, error) {
 	}, nil
 }
 
-// formatSize 格式化大小为字节字符串
+// formatSize - Format size to bytes string
 func formatSize(bytes int64) string {
 	return fmt.Sprintf("%db", bytes)
 }
 
-// parseSize 解析大小字符串 (如 "10.00g")
+// parseSize - Parse size string (e.g., "10.00g")
 func parseSize(s string) int64 {
 	s = strings.TrimSpace(s)
-	
 	re := regexp.MustCompile(`^([\d.]+)([smgtbpk]?)$`)
 	matches := re.FindStringSubmatch(s)
 	if matches == nil {
 		return 0
 	}
-
 	value, _ := strconv.ParseFloat(matches[1], 64)
 	unit := matches[2]
-
-	// 转换为字节
+	// Convert to bytes
 	multipliers := map[string]float64{
 		"p": 1024 * 1024 * 1024 * 1024 * 1024,
 		"t": 1024 * 1024 * 1024 * 1024,
@@ -294,15 +282,13 @@ func parseSize(s string) int64 {
 		"k": 1024,
 		"b": 1,
 	}
-
 	if mult, ok := multipliers[unit]; ok {
 		value *= mult
 	}
-
 	return int64(value)
 }
 
-// atoi 简单字符串转整数
+// atoi - Simple string to int
 func atoi(s string) int {
 	n, _ := strconv.Atoi(strings.TrimSpace(s))
 	return n

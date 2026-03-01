@@ -4,8 +4,8 @@ OpenHR (Open Hybrid RAID) is a SHR-like hybrid RAID storage management tool writ
 
 ## Features
 
-- **SHR-1**: Single Disk Fault Tolerance Hybrid RAID
-- **SHR-2**: Dual Disk Fault Tolerance Hybrid RAID
+- **SHR-1**: Single Disk Fault Tolerance Hybrid RAID (Multi-layer Architecture)
+- **SHR-2**: Dual Disk Fault Tolerance Hybrid RAID (Multi-layer Architecture)
 - **Traditional RAID**: RAID 1/5/6, Basic, JBOD support
 - **Capacity Calculation**: Smart estimation for different configurations
 - **Pool Management**: Create, delete, expand storage pools
@@ -42,20 +42,20 @@ Before creating a pool, you can estimate the capacity:
 
 ```bash
 # SHR-1 mode estimation
-openhr capacity estimate --disks=4TB --disks=8TB --disks=16TB --mode shr1
+openhr capacity estimate --disks 4TB --disks 8TB --disks 16TB --mode shr1
 
 # SHR-2 mode estimation
-openhr capacity estimate --disks=4TB --disks=8TB --disks=16TB --disks=16TB --mode shr2
+openhr capacity estimate --disks 4TB --disks 8TB --disks 16TB --disks 16TB --mode shr2
 
 # RAID5 estimation
-openhr capacity estimate --disks=4TB --disks=8TB --disks=16TB --mode raid5
+openhr capacity estimate --disks 4TB --disks 8TB --disks 16TB --mode raid5
 ```
 
 ### Pool Management
 
 ```bash
-# Create a pool
-sudo openhr pool create --name mypool --mode shr1 --disks=/dev/sda --disks=/dev/sdb --disks=/dev/sdc
+# Create a pool (use repeated --disks flags)
+sudo openhr pool create --name mypool --mode shr1 --disks /dev/sda --disks /dev/sdb --disks /dev/sdc
 
 # List pools
 sudo openhr pool list
@@ -64,7 +64,7 @@ sudo openhr pool list
 sudo openhr pool info mypool
 
 # Expand a pool
-sudo openhr pool expand mypool --disks=/dev/sdd
+sudo openhr pool expand mypool --disks /dev/sdd --disks /dev/sde
 
 # Delete a pool
 sudo openhr pool delete mypool
@@ -104,74 +104,89 @@ openhr volume list
 
 ## SHR Implementation Details
 
-### SHR-1 (Single Disk Fault Tolerance)
+OpenHR implements a **multi-layer architecture** similar to Synology's SHR, which maximizes storage efficiency when using mixed-size disks.
 
-SHR-1 provides single disk fault tolerance while maximizing storage efficiency when using mixed-size disks.
+### Multi-Layer Algorithm
 
-**How it works:**
-1. Each disk is divided into two zones: **data zone** and **parity zone**
-2. Data zone uses **RAID 0** (striping) to maximize capacity
-3. Parity zone uses **RAID 1** (mirroring) for redundancy
-4. The largest disk's capacity determines the redundancy overhead
+1. **Sort disks by size** (ascending order)
+2. **Iteratively create layers**:
+   - Find all disks with remaining space
+   - Use the minimum remaining space as the layer size
+   - Determine RAID level based on disk count and parity
+   - Create a RAID array for this layer
+   - Deduct allocated space from each participating disk
+3. **Combine all layers** using LVM to form a single storage pool
 
-**Capacity Formula:**
+### RAID Level Decision
+
+| SHR Type | Disk Count | RAID Level | Capacity Formula |
+|----------|------------|------------|------------------|
+| SHR-1 | 2 disks | RAID 1 | `size × 1` |
+| SHR-1 | 3+ disks | RAID 5 | `size × (n-1)` |
+| SHR-2 | 4+ disks | RAID 6 | `size × (n-2)` |
+
+### SHR-1 Example: 4TB + 8TB + 16TB disks
+
 ```
-Usable = Total - MaxDiskSize
-```
+┌──────────────────────────────────────────────────────────────────┐
+│ Layer 0: 3 disks × 4TB = 12TB raw                                │
+│   Disk1 (4TB)  [====4TB====]                                     │
+│   Disk2 (8TB)  [====4TB====]      → RAID5 (8TB usable)           │
+│   Disk3 (16TB) [====4TB====]                                     │
+│   Remaining: D1=0TB, D2=4TB, D3=12TB                             │
+├──────────────────────────────────────────────────────────────────┤
+│ Layer 1: 2 disks × 4TB = 8TB raw                                 │
+│   Disk2 (8TB)           [====4TB====]                            │
+│   Disk3 (16TB)          [====4TB====] → RAID1 (4TB usable)       │
+│   Remaining: D2=0TB, D3=8TB                                      │
+├──────────────────────────────────────────────────────────────────┤
+│ Layer 2: 1 disk × 8TB (skipped - insufficient disks)             │
+│   Disk3 (16TB)                   [========8TB========]           │
+└──────────────────────────────────────────────────────────────────┘
 
-**Example: 4TB + 8TB + 16TB disks**
-```
-Total Raw:     4 + 8 + 16 = 28 TB
-Parity:        16 TB (largest disk)
-Usable:        28 - 16 = 12 TB
-
-Redundancy: Can tolerate 1 disk failure
-```
-
-**Visual Representation:**
-```
-Disk 1 (4TB):  [====DATA 2TB====][==PARITY 2TB==]
-Disk 2 (8TB):  [====DATA 4TB====][==PARITY 4TB==]
-Disk 3 (16TB): [====DATA 8TB====][==PARITY 8TB==]
-                    |                |
-                    v                v
-                RAID 0          RAID 1 (mirrored)
-                (striping)      (redundancy)
-
-Total Data:  2+4+8 = 14 TB (RAID 0)
-Total Parity: 2+4+8 = 14 TB (RAID 1, 3 copies)
-Usable: 14 TB (but formula says 12TB due to disk size accounting)
-```
-
----
-
-### SHR-2 (Dual Disk Fault Tolerance)
-
-SHR-2 provides dual disk fault tolerance for higher data protection.
-
-**How it works:**
-1. Each disk is divided into two zones: **data zone** and **parity zone**
-2. Data zone uses **RAID 0** (striping) to maximize capacity
-3. Parity zone uses **RAID 1** with 2 copies for dual redundancy
-4. Two times the largest disk's capacity is reserved for redundancy
-
-**Capacity Formula:**
-```
-Usable = Total - 2 * MaxDiskSize
+Total Usable: 8TB + 4TB = 12TB
+Wasted: 8TB (single disk leftover)
 ```
 
-**Example: 4TB + 8TB + 16TB + 16TB disks**
+### SHR-2 Example: 4TB + 8TB + 16TB + 16TB disks
+
 ```
-Total Raw:     4 + 8 + 16 + 16 = 44 TB
-Parity:        32 TB (2 x largest disk)
-Usable:        44 - 32 = 12 TB
+┌──────────────────────────────────────────────────────────────────┐
+│ Layer 0: 4 disks × 4TB = 16TB raw                                │
+│   Disk1 (4TB)  [====4TB====]                                     │
+│   Disk2 (8TB)  [====4TB====]      → RAID6 (8TB usable)           │
+│   Disk3 (16TB) [====4TB====]                                     │
+│   Disk4 (16TB) [====4TB====]                                     │
+│   Remaining: D1=0TB, D2=4TB, D3=12TB, D4=12TB                    │
+├──────────────────────────────────────────────────────────────────┤
+│ Layer 1: 3 disks × 4TB = 12TB raw                                │
+│   Disk2 (8TB)           [====4TB====]                            │
+│   Disk3 (16TB)          [====4TB====] → RAID5 (8TB usable)       │
+│   Disk4 (16TB)          [====4TB====]                            │
+│   Remaining: D2=0TB, D3=8TB, D4=8TB                              │
+├──────────────────────────────────────────────────────────────────┤
+│ Layer 2: 2 disks × 8TB = 16TB raw                                │
+│   Disk3 (16TB)          [========8TB========]                    │
+│   Disk4 (16TB)          [========8TB========] → RAID1 (8TB usable)│
+└──────────────────────────────────────────────────────────────────┘
 
-Redundancy: Can tolerate 2 disk failures
+Total Usable: 8TB + 8TB + 8TB = 24TB
+Wasted: 0TB
 ```
 
-**Minimum Requirement:** 4 disks
+### Pool Expansion
 
----
+SHR pools support dynamic expansion:
+
+```bash
+# Add new disks to expand an existing SHR pool
+sudo openhr pool expand mypool --disks /dev/sdd --disks /dev/sde
+```
+
+When expanding:
+1. New disks are added to existing layers if possible
+2. New layers may be created if beneficial
+3. All layers are combined through LVM for seamless capacity increase
 
 ### Traditional RAID Comparison
 
@@ -180,12 +195,13 @@ Redundancy: Can tolerate 2 disk failures
 | RAID 1 | Min disk size | 50% | 2 |
 | RAID 5 | (n-1) x Min disk | ~67-93% | 3 |
 | RAID 6 | (n-2) x Min disk | ~50-88% | 4 |
-| SHR-1 | Total - Max disk | ~43-90% | 2 |
-| SHR-2 | Total - 2xMax disk | ~27-75% | 4 |
+| SHR-1 | Multi-layer calculation | ~43-90% | 2 |
+| SHR-2 | Multi-layer calculation | ~27-75% | 4 |
 
 **Key Advantage of SHR:**
 - Unlike traditional RAID, SHR allows mixing different size disks without wasting the extra space on larger drives
 - More flexible expansion options
+- Maximum storage efficiency for mixed-size disk configurations
 
 ## Notes
 
@@ -196,4 +212,4 @@ Redundancy: Can tolerate 2 disk failures
 
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE) file for details.

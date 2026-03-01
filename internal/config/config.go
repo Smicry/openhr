@@ -9,23 +9,23 @@ import (
 
 var cfgFile string
 
-// CfgFile 全局配置文件路径变量
+// CfgFile - Global config file path variable
 var CfgFile string
 
-// Init 初始化配置
+// Init - Initialize config
 func Init() {
-	// 设置默认值
+	// Set default values
 	viper.SetDefault("log.level", "info")
 	viper.SetDefault("log.format", "text")
 	viper.SetDefault("mdadm.path", "/sbin/mdadm")
 	viper.SetDefault("lvm.path", "/sbin/lvm")
 	viper.SetDefault("parted.path", "/sbin/parted")
 
-	// 从环境变量加载
+	// Load from environment variables
 	viper.SetEnvPrefix("OPENHR")
 	viper.AutomaticEnv()
 
-	// 加载配置文件
+	// Load config file
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {
@@ -39,26 +39,26 @@ func Init() {
 	}
 
 	if err := viper.ReadInConfig(); err == nil {
-		fmt.Fprintf(os.Stderr, "使用配置文件: %s\n", viper.ConfigFileUsed())
+		fmt.Fprintf(os.Stderr, "Using config file: %s\n", viper.ConfigFileUsed())
 	}
 }
 
-// GetString 获取字符串配置
+// GetString - Get string config
 func GetString(key string) string {
 	return viper.GetString(key)
 }
 
-// GetInt 获取整数配置
+// GetInt - Get int config
 func GetInt(key string) int {
 	return viper.GetInt(key)
 }
 
-// GetBool 获取布尔配置
+// GetBool - Get bool config
 func GetBool(key string) bool {
 	return viper.GetBool(key)
 }
 
-// SetConfigFile 设置配置文件路径
+// SetConfigFile - Set config file path
 func SetConfigFile(path string) {
 	cfgFile = path
 	CfgFile = path

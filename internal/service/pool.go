@@ -49,7 +49,7 @@ func (s *PoolService) CreatePool(cfg models.PoolConfig) (*models.Pool, error) {
 		}
 	}
 	capacity := s.calc.EstimateCapacity(sizes, cfg.Mode)
-	
+
 	logger.Info("Raw Total: %s", FormatBytes(capacity.TotalRawCapacity))
 	logger.Info("Parity: %s", FormatBytes(capacity.ParityCapacity))
 	logger.Info("Usable: %s", FormatBytes(capacity.UsableCapacity))
@@ -91,110 +91,155 @@ func (s *PoolService) collectDiskInfo(devices []string) ([]models.Disk, error) {
 	return disks, nil
 }
 
-// createSHRPool creates an SHR pool
+// createSHRPool creates an SHR pool using Synology's multi-layer algorithm
+// Each disk is divided into multiple layers, each layer forms its own RAID array
+// All RAID arrays are combined using LVM to form a single storage pool
 func (s *PoolService) createSHRPool(disks []models.Disk, name string, parity int) (*models.Pool, error) {
-	logger.Info("Creating SHR-%d pool", parity)
-
-	// Find min and max disk size
-	minSize := disks[0].Size
-	maxSize := disks[0].Size
-	for _, d := range disks {
-		if d.Size < minSize {
-			minSize = d.Size
-		}
-		if d.Size > maxSize {
-			maxSize = d.Size
-		}
-	}
-
-	// 计算每个分区的容量
-	dataSize := minSize
-	paritySize := maxSize
-
-	logger.Info("Data zone size: %s", FormatBytes(dataSize))
-	logger.Info("Parity zone size: %s", FormatBytes(paritySize))
-
-	// Create partitions
-	logger.Info("Creating partitions...")
-	raidDevices := make([]string, len(disks))
-	
-	for i, disk := range disks {
-		logger.Info("Partitioning disk: %s", disk.Device)
-		
-		// Create data partition (50%)
-		dataPart := fmt.Sprintf("%s1", disk.Device)
-		err := s.parted.CreatePartition(disk.Device, "primary", "0%", "50%")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create data partition: %w", err)
-		}
-		raidDevices[i] = dataPart
-
-		// Create parity partition (50%)
-		parityPart := fmt.Sprintf("%s2", disk.Device)
-		_ = parityPart // Keep partition path for later use
-		err = s.parted.CreatePartition(disk.Device, "primary", "50%", "100%")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create parity partition: %w", err)
-		}
-
-		// Set partition type to RAID
-		s.parted.SetPartitionType(disk.Device, 1, "raid")
-		s.parted.SetPartitionType(disk.Device, 2, "raid")
-	}
-
-	// Create RAID (use RAID0 for data zone to maximize space)
-	logger.Info("Creating data RAID...")
-	dataRAID, err := s.mdadm.CreateRAID(0, raidDevices, name+"_data", false)
+	logger.Info("Creating SHR-%d pool with multi-layer architecture", parity)
+	planner := NewSHRPlanner()
+	// 1. Plan the SHR layout
+	layout, err := planner.PlanLayout(disks, parity)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create data RAID: %w", err)
+		return nil, fmt.Errorf("failed to plan SHR layout: %w", err)
 	}
-
-	// Create parity RAID (RAID1)
-	parityDevices := make([]string, len(disks))
-	for i := range disks {
-		parityDevices[i] = fmt.Sprintf("%s2", disks[i].Device)
+	if len(layout.Layers) == 0 {
+		return nil, fmt.Errorf("no valid layers can be formed")
 	}
-	logger.Info("Creating parity RAID...")
-	parityRAID, err := s.mdadm.CreateRAID(1, parityDevices, name+"_parity", true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parity RAID: %w", err)
+	logger.Info("SHR-%d layout: %d layers, total capacity: %s",
+		parity, len(layout.Layers), FormatBytes(layout.TotalCapacity))
+	// 2. Create partitions for each layer on each disk
+	logger.Info("Creating partitions for each layer...")
+	if err := s.createSHRPartitions(layout, name); err != nil {
+		return nil, fmt.Errorf("failed to create partitions: %w", err)
 	}
-
-	// Create LVM PV
+	// 3. Create RAID arrays for each layer
+	logger.Info("Creating RAID arrays for each layer...")
+	if err := s.createSHRRAIDs(layout, name); err != nil {
+		return nil, fmt.Errorf("failed to create RAID arrays: %w", err)
+	}
+	// 4. Create LVM PVs for all RAID devices
 	logger.Info("Creating LVM physical volumes...")
-	err = s.lvm.CreatePV(dataRAID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create data PV: %w", err)
+	var pvDevices []string
+	for i := range layout.Layers {
+		raidDev := layout.Layers[i].RAIDDevice
+		if err := s.lvm.CreatePV(raidDev); err != nil {
+			return nil, fmt.Errorf("failed to create PV for layer %d: %w", i, err)
+		}
+		pvDevices = append(pvDevices, raidDev)
 	}
-	err = s.lvm.CreatePV(parityRAID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parity PV: %w", err)
-	}
-
-	// Create VG
+	// 5. Create VG combining all layers
 	vgName := "openhr_" + name
 	logger.Info("Creating volume group: %s", vgName)
-	err = s.lvm.CreateVG(vgName, []string{dataRAID, parityRAID})
-	if err != nil {
+	if err := s.lvm.CreateVG(vgName, pvDevices); err != nil {
 		return nil, fmt.Errorf("failed to create VG: %w", err)
 	}
-
-	// Return pool information
+	// Determine the mode string
+	var mode models.StorageMode
+	if parity == 1 {
+		mode = models.ModeSHR1
+	} else {
+		mode = models.ModeSHR2
+	}
 	pool := &models.Pool{
 		ID:        vgName,
 		Name:      name,
-		Mode:      models.ModeSHR1,
+		Mode:      mode,
 		Status:    models.PoolStatusActive,
-		TotalSize: (minSize * int64(len(disks)-parity)) + (maxSize * int64(parity)),
+		TotalSize: layout.TotalCapacity,
 		Disks:     disks,
 		VGName:    vgName,
-		RAIDDev:   dataRAID,
+		RAIDDev:   layout.Layers[0].RAIDDevice,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
-
-	logger.Info("[OK] Pool created successfully: %s", name)
+	logger.Info("[OK] SHR-%d pool created successfully: %s (%d layers)", parity, name, len(layout.Layers))
 	return pool, nil
+}
+
+// createSHRPartitions creates partitions for each layer on each disk
+func (s *PoolService) createSHRPartitions(layout *models.SHRLayout, poolName string) error {
+	// Track partition numbers for each disk
+	partitionNumbers := make(map[string]int)
+	for _, disk := range layout.Disks {
+		partitionNumbers[disk.Device] = 1
+	}
+	// For each layer, create partitions on participating disks
+	for layerIdx := range layout.Layers {
+		layer := &layout.Layers[layerIdx]
+		logger.Info("Creating partitions for layer %d (%s)...", layerIdx, layer.GetRAIDLevelName())
+		for _, diskDev := range layer.DiskDevices {
+			disk := s.findDiskByDevice(layout.Disks, diskDev)
+			if disk == nil {
+				return fmt.Errorf("disk not found: %s", diskDev)
+			}
+			// Calculate partition boundaries
+			partNum := partitionNumbers[diskDev]
+			startOffset := s.calculateLayerStartOffset(layout, diskDev, layerIdx)
+			endOffset := startOffset + layer.Size
+			// Create partition
+			startPct := float64(startOffset) * 100 / float64(disk.Size)
+			endPct := float64(endOffset) * 100 / float64(disk.Size)
+			partDev := fmt.Sprintf("%s%d", diskDev, partNum)
+			logger.Debug("  Creating partition %s: %.1f%% - %.1f%% (%s)",
+				partDev, startPct, endPct, FormatBytes(layer.Size))
+			err := s.parted.CreatePartition(diskDev, "primary",
+				fmt.Sprintf("%.1f%%", startPct),
+				fmt.Sprintf("%.1f%%", endPct))
+			if err != nil {
+				return fmt.Errorf("failed to create partition %s: %w", partDev, err)
+			}
+			// Set partition type to RAID
+			if err := s.parted.SetPartitionType(diskDev, partNum, "raid"); err != nil {
+				logger.Warn("Failed to set partition type for %s: %v", partDev, err)
+			}
+			layer.Partitions = append(layer.Partitions, partDev)
+			partitionNumbers[diskDev]++
+		}
+	}
+	return nil
+}
+
+// createSHRRAIDs creates RAID arrays for each layer
+func (s *PoolService) createSHRRAIDs(layout *models.SHRLayout, poolName string) error {
+	for i := range layout.Layers {
+		layer := &layout.Layers[i]
+		raidName := fmt.Sprintf("%s_layer%d", poolName, i)
+		logger.Info("Creating RAID array for layer %d: %s (%s) with %d devices",
+			i, raidName, layer.GetRAIDLevelName(), len(layer.Partitions))
+		raidDev, err := s.mdadm.CreateRAID(layer.RAIDLevel, layer.Partitions, raidName, true)
+		if err != nil {
+			return fmt.Errorf("failed to create RAID for layer %d: %w", i, err)
+		}
+		layer.RAIDDevice = raidDev
+		logger.Info("  Created RAID device: %s", raidDev)
+	}
+	return nil
+}
+
+// calculateLayerStartOffset calculates the start offset for a layer on a disk
+func (s *PoolService) calculateLayerStartOffset(layout *models.SHRLayout, diskDev string, targetLayerIdx int) int64 {
+	var offset int64
+	for i := 0; i < targetLayerIdx; i++ {
+		layer := &layout.Layers[i]
+		// Check if this disk participates in this layer
+		for _, dev := range layer.DiskDevices {
+			if dev == diskDev {
+				offset += layer.Size
+				break
+			}
+		}
+	}
+	return offset
+}
+
+// findDiskByDevice finds a disk by its device path
+func (s *PoolService) findDiskByDevice(disks []models.Disk, device string) *models.Disk {
+	for i := range disks {
+		if disks[i].Device == device {
+			return &disks[i]
+		}
+	}
+	return nil
 }
 
 // createRAID1Pool creates RAID1 pool
@@ -209,7 +254,7 @@ func (s *PoolService) createRAID1Pool(disks []models.Disk, name string) (*models
 		return nil, err
 	}
 
-	// 创建LVM
+	// Create LVM PV
 	err = s.lvm.CreatePV(raidDev)
 	if err != nil {
 		return nil, err
@@ -222,16 +267,16 @@ func (s *PoolService) createRAID1Pool(disks []models.Disk, name string) (*models
 	}
 
 	return &models.Pool{
-		ID:         vgName,
-		Name:       name,
-		Mode:       models.ModeRAID1,
-		Status:     models.PoolStatusActive,
-		TotalSize:  disks[0].Size,
-		Disks:      disks,
-		VGName:     vgName,
-		RAIDDev:    raidDev,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:        vgName,
+		Name:      name,
+		Mode:      models.ModeRAID1,
+		Status:    models.PoolStatusActive,
+		TotalSize: disks[0].Size,
+		Disks:     disks,
+		VGName:    vgName,
+		RAIDDev:   raidDev,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}, nil
 }
 
@@ -266,16 +311,16 @@ func (s *PoolService) createRAID5Pool(disks []models.Disk, name string) (*models
 	}
 
 	return &models.Pool{
-		ID:         vgName,
-		Name:       name,
-		Mode:       models.ModeRAID5,
-		Status:     models.PoolStatusActive,
-		TotalSize:  minSize * int64(len(disks)-1),
-		Disks:      disks,
-		VGName:     vgName,
-		RAIDDev:    raidDev,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:        vgName,
+		Name:      name,
+		Mode:      models.ModeRAID5,
+		Status:    models.PoolStatusActive,
+		TotalSize: minSize * int64(len(disks)-1),
+		Disks:     disks,
+		VGName:    vgName,
+		RAIDDev:   raidDev,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}, nil
 }
 
@@ -310,28 +355,28 @@ func (s *PoolService) createRAID6Pool(disks []models.Disk, name string) (*models
 	}
 
 	return &models.Pool{
-		ID:         vgName,
-		Name:       name,
-		Mode:       models.ModeRAID6,
-		Status:     models.PoolStatusActive,
-		TotalSize:  minSize * int64(len(disks)-2),
-		Disks:      disks,
-		VGName:     vgName,
-		RAIDDev:    raidDev,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:        vgName,
+		Name:      name,
+		Mode:      models.ModeRAID6,
+		Status:    models.PoolStatusActive,
+		TotalSize: minSize * int64(len(disks)-2),
+		Disks:     disks,
+		VGName:    vgName,
+		RAIDDev:   raidDev,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}, nil
 }
 
 // createBasicPool creates Basic pool
 func (s *PoolService) createBasicPool(disks []models.Disk, name string) (*models.Pool, error) {
 	if len(disks) != 1 {
-		return nil, fmt.Errorf("Basic模式只能使用1块硬盘")
+		return nil, fmt.Errorf("Basic mode can only use 1 disk")
 	}
 
 	disk := disks[0]
-	
-	// 创建分区
+
+	// Create partition
 	err := s.parted.CreatePartition(disk.Device, "primary", "0%", "100%")
 	if err != nil {
 		return nil, err
@@ -339,13 +384,13 @@ func (s *PoolService) createBasicPool(disks []models.Disk, name string) (*models
 
 	partDev := fmt.Sprintf("%s1", disk.Device)
 
-	// 创建LVM PV
+	// Create LVM PV
 	err = s.lvm.CreatePV(partDev)
 	if err != nil {
 		return nil, err
 	}
 
-	// 创建VG
+	// Create VG
 	vgName := "openhr_" + name
 	err = s.lvm.CreateVG(vgName, []string{partDev})
 	if err != nil {
@@ -353,16 +398,16 @@ func (s *PoolService) createBasicPool(disks []models.Disk, name string) (*models
 	}
 
 	return &models.Pool{
-		ID:         vgName,
-		Name:       name,
-		Mode:       models.ModeBasic,
-		Status:     models.PoolStatusActive,
-		TotalSize:  disk.Size,
-		Disks:      disks,
-		VGName:     vgName,
-		RAIDDev:    partDev,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		ID:        vgName,
+		Name:      name,
+		Mode:      models.ModeBasic,
+		Status:    models.PoolStatusActive,
+		TotalSize: disk.Size,
+		Disks:     disks,
+		VGName:    vgName,
+		RAIDDev:   partDev,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}, nil
 }
 
@@ -395,20 +440,20 @@ func (s *PoolService) ListPools() ([]*models.Pool, error) {
 
 	var pools []*models.Pool
 	for _, vg := range vgs {
-		// 只列出openhr开头的卷组
+		// Only list VGs starting with openhr_
 		if !strings.HasPrefix(vg.Name, "openhr_") {
 			continue
 		}
 
 		pool := &models.Pool{
-			ID:          vg.Name,
-			Name:        strings.TrimPrefix(vg.Name, "openhr_"),
-			TotalSize:   vg.Size,
-			FreeSize:   vg.Free,
-			UsedSize:   vg.Size - vg.Free,
-			VGName:      vg.Name,
-			CreatedAt:   time.Now(),
-			UpdatedAt:   time.Now(),
+			ID:        vg.Name,
+			Name:      strings.TrimPrefix(vg.Name, "openhr_"),
+			TotalSize: vg.Size,
+			FreeSize:  vg.Free,
+			UsedSize:  vg.Size - vg.Free,
+			VGName:    vg.Name,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 		pools = append(pools, pool)
 	}
@@ -426,27 +471,33 @@ func (s *PoolService) GetPool(name string) (*models.Pool, error) {
 	}
 
 	return &models.Pool{
-		ID:          vgName,
-		Name:        name,
-		TotalSize:   vginfo.Size,
-		FreeSize:   vginfo.Free,
-		UsedSize:   vginfo.Size - vginfo.Free,
-		VGName:      vgName,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:        vgName,
+		Name:      name,
+		TotalSize: vginfo.Size,
+		FreeSize:  vginfo.Free,
+		UsedSize:  vginfo.Size - vginfo.Free,
+		VGName:    vgName,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}, nil
 }
 
 // ExpandPool expands a storage pool
 func (s *PoolService) ExpandPool(name string, newDisks []string) error {
 	vgName := "openhr_" + name
-
-	// 收集新硬盘信息
+	// Check if this is an SHR pool by detecting if VG has multiple /dev/md/* devices
+	isSHR := s.isSHRPool(vgName)
+	if isSHR {
+		// Use SHR expander for SHR pools
+		expander := NewSHRExpander()
+		return expander.Expand(name, newDisks)
+	}
+	// Standard pool expansion (non-SHR)
+	// Collect new disk info
 	disks, err := s.collectDiskInfo(newDisks)
 	if err != nil {
 		return err
 	}
-
 	// Create partitions
 	var pvs []string
 	for _, disk := range disks {
@@ -454,11 +505,9 @@ func (s *PoolService) ExpandPool(name string, newDisks []string) error {
 		if err != nil {
 			return err
 		}
-
 		partDev := fmt.Sprintf("%s1", disk.Device)
 		pvs = append(pvs, partDev)
 	}
-
 	// Create PV
 	for _, pv := range pvs {
 		err = s.lvm.CreatePV(pv)
@@ -466,15 +515,29 @@ func (s *PoolService) ExpandPool(name string, newDisks []string) error {
 			return err
 		}
 	}
-
 	// Extend VG
 	err = s.lvm.ExtendVG(vgName, pvs)
 	if err != nil {
 		return err
 	}
-
 	logger.Info("[OK] Pool expanded: %s", name)
 	return nil
+}
+
+// isSHRPool checks if a pool is an SHR pool by detecting multiple /dev/md/* devices in VG
+func (s *PoolService) isSHRPool(vgName string) bool {
+	pvs, err := s.lvm.ListPVs()
+	if err != nil {
+		return false
+	}
+	mdCount := 0
+	for _, pv := range pvs {
+		if pv.VGName == vgName && strings.HasPrefix(pv.Name, "/dev/md/") {
+			mdCount++
+		}
+	}
+	// SHR pool has multiple MD devices (one per layer)
+	return mdCount >= 2
 }
 
 // GetPoolByVGName gets pool by VG name (internal use)
@@ -485,14 +548,14 @@ func (s *PoolService) GetPoolByVGName(vgName string) (*models.Pool, error) {
 	}
 
 	return &models.Pool{
-		ID:          vgName,
-		Name:        strings.TrimPrefix(vgName, "openhr_"),
-		TotalSize:   vginfo.Size,
-		FreeSize:   vginfo.Free,
-		UsedSize:   vginfo.Size - vginfo.Free,
-		VGName:      vgName,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:        vgName,
+		Name:      strings.TrimPrefix(vgName, "openhr_"),
+		TotalSize: vginfo.Size,
+		FreeSize:  vginfo.Free,
+		UsedSize:  vginfo.Size - vginfo.Free,
+		VGName:    vgName,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}, nil
 }
 
