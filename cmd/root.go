@@ -113,9 +113,18 @@ Examples:
 				return fmt.Errorf("invalid storage mode: %s", poolMode)
 			}
 			calc := service.NewCapacityCalculator()
+			parted := storage.NewPartitionOperator()
 			diskSizes := make([]service.DiskSizeInfo, len(poolDisks))
-			for i := range poolDisks {
-				diskSizes[i] = service.DiskSizeInfo{Device: poolDisks[i]}
+			for i, dev := range poolDisks {
+				disk, err := parted.GetDiskInfo(dev)
+				if err != nil {
+					return fmt.Errorf("failed to get disk info for %s: %w", dev, err)
+				}
+				diskSizes[i] = service.DiskSizeInfo{
+					Device:  dev,
+					Size:    disk.Size,
+					SizeStr: disk.SizeHuman,
+				}
 			}
 			capacity := calc.EstimateCapacity(diskSizes, mode)
 			fmt.Println()

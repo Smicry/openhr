@@ -421,10 +421,32 @@ func (s *PoolService) DeletePool(name string) error {
 		return fmt.Errorf("pool does not exist: %s", name)
 	}
 
-	// Remove VG
+	// Get all PVs in this VG
+	pvs, err := s.lvm.ListPVs()
+	if err != nil {
+		return fmt.Errorf("failed to list PVs: %w", err)
+	}
+
+	// Collect all MD devices before removing VG
+	var mdDevices []string
+	for _, pv := range pvs {
+		if pv.VGName == vgName && strings.HasPrefix(pv.Name, "/dev/md/") {
+			mdDevices = append(mdDevices, pv.Name)
+		}
+	}
+
+	// Remove VG first (this releases the PVs)
 	err = s.lvm.RemoveVG(vgName)
 	if err != nil {
 		return fmt.Errorf("failed to remove VG: %w", err)
+	}
+
+	// Stop and clean up RAID arrays
+	for _, mdDev := range mdDevices {
+		logger.Info("Cleaning up RAID array: %s", mdDev)
+		if err := s.mdadm.RemoveRAID(mdDev); err != nil {
+			logger.Warn("Failed to clean up RAID %s: %v", mdDev, err)
+		}
 	}
 
 	logger.Info("[OK] Pool deleted: %s", name)

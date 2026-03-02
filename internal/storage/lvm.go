@@ -125,6 +125,35 @@ func (l *LVMOperator) ExtendLV(vg, name string, size int64) error {
 	return nil
 }
 
+// ExtendLVFilesystem - Extend filesystem on logical volume
+func (l *LVMOperator) ExtendLVFilesystem(vg, name string, fs string) error {
+	dev := fmt.Sprintf("/dev/%s/%s", vg, name)
+	switch strings.ToLower(fs) {
+	case "ext4", "ext3", "ext2":
+		_, err := l.executor.Run("resize2fs", dev)
+		if err != nil {
+			return fmt.Errorf("failed to resize ext filesystem: %v", err)
+		}
+	case "xfs":
+		_, err := l.executor.Run("xfs_growfs", dev)
+		if err != nil {
+			return fmt.Errorf("failed to resize xfs filesystem: %v", err)
+		}
+	case "btrfs":
+		_, err := l.executor.Run("btrfs", "filesystem", "resize", "max", dev)
+		if err != nil {
+			return fmt.Errorf("failed to resize btrfs filesystem: %v", err)
+		}
+	default:
+		// Try resize2fs as default (works for ext2/3/4)
+		_, err := l.executor.Run("resize2fs", dev)
+		if err != nil {
+			return fmt.Errorf("failed to resize filesystem: %v", err)
+		}
+	}
+	return nil
+}
+
 // ReduceLV - Reduce logical volume
 func (l *LVMOperator) ReduceLV(vg, name string, size int64) error {
 	sizeStr := formatSize(size)

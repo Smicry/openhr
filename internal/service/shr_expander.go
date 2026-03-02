@@ -219,6 +219,7 @@ func (e *SHRExpander) executeExpansionPlan(
 		layer := &newLayout.Layers[exp.LayerIndex]
 		// Create partitions on new disks for this layer
 		partNum := e.getNextPartitionNumber(exp.NewDisks[0])
+		var newPartitions []string
 		for _, diskDev := range exp.NewDisks {
 			disk, _ := e.parted.GetDiskInfo(diskDev)
 			// Calculate partition position
@@ -234,16 +235,9 @@ func (e *SHRExpander) executeExpansionPlan(
 				return fmt.Errorf("failed to create partition on %s: %w", diskDev, err)
 			}
 			e.parted.SetPartitionType(diskDev, partNum, "raid")
-			// Add to RAID array
-			raidDev := layer.RAIDDevice
-			if raidDev == "" {
-				raidDev = fmt.Sprintf("/dev/md/%s_layer%d", poolName, exp.LayerIndex)
-			}
-			logger.Info("Adding %s to RAID array %s", partDev, raidDev)
-			if err := e.mdadm.AddDeviceRAID(raidDev, partDev); err != nil {
-				return fmt.Errorf("failed to add %s to RAID: %w", partDev, err)
-			}
+			newPartitions = append(newPartitions, partDev)
 			layer.Partitions = append(layer.Partitions, partDev)
+			partNum++
 		}
 		// Grow the RAID array
 		raidDev := layer.RAIDDevice
@@ -251,6 +245,10 @@ func (e *SHRExpander) executeExpansionPlan(
 			raidDev = fmt.Sprintf("/dev/md/%s_layer%d", poolName, exp.LayerIndex)
 		}
 		logger.Info("Growing RAID array: %s", raidDev)
+		if err := e.mdadm.GrowRAID(raidDev, newPartitions); err != nil {
+			return fmt.Errorf("failed to grow RAID array %s: %w", raidDev, err)
+		}
+		logger.Info("Layer %d expanded successfully", exp.LayerIndex)
 	}
 	// 2. Create new layers
 	for i := range plan.NewLayers {

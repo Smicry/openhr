@@ -92,16 +92,16 @@ func (p *PartitionOperator) parsePartitions(output string, dev string) ([]models
 		if line == "" {
 			continue
 		}
-		// Skip header info
-		if !strings.HasPrefix(line, strconv.Itoa(len(partitions)+1)+":") {
-			continue
-		}
+		// Skip header lines (lines that don't start with a number)
 		fields := strings.Split(line, ":")
 		if len(fields) < 6 {
 			continue
 		}
-		// Parse fields
-		num, _ := strconv.Atoi(fields[0])
+		numStr := fields[0]
+		if _, err := strconv.Atoi(numStr); err != nil {
+			continue // Skip non-numeric lines (headers)
+		}
+		num, _ := strconv.Atoi(numStr)
 		startStr := strings.TrimSuffix(fields[1], "B")
 		endStr := strings.TrimSuffix(fields[2], "B")
 		sizeStr := strings.TrimSuffix(fields[3], "B")
@@ -137,12 +137,14 @@ func (p *PartitionOperator) GetDiskInfo(dev string) (*models.Disk, error) {
 		disk.SizeHuman = formatBytes(size)
 	}
 	// Get device info
-	output, err = p.executor.Run("lsblk", "-d", "-o", "NAME,MODEL,VENDOR,RO,TRANTYPE", "-n", dev)
+	output, err = p.executor.Run("lsblk", "-d", "-o", "NAME,MODEL,VENDOR,RO,TRAN", "-n", dev)
 	if err == nil {
 		fields := strings.Fields(output)
-		if len(fields) >= 4 {
+		if len(fields) >= 3 {
 			disk.Model = fields[1]
 			disk.Vendor = fields[2]
+		}
+		if len(fields) >= 4 {
 			disk.Ro = fields[3] == "1"
 		}
 	}

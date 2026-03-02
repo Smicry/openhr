@@ -2,8 +2,10 @@ package storage
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/openhr/internal/models"
 )
@@ -55,15 +57,16 @@ func (m *MDADMOperator) CreateRAID(level int, devices []string, name string, bit
 
 // RemoveRAID - Remove RAID array
 func (m *MDADMOperator) RemoveRAID(dev string) error {
+	// Get component devices before stopping
+	devices := m.getComponentDevices(dev)
 	// Stop array first
 	_, err := m.executor.Run("mdadm", "--stop", dev)
 	if err != nil {
 		return fmt.Errorf("failed to stop RAID: %v", err)
 	}
-	// Clear superblock
-	devices := m.getComponentDevices(dev)
+	// Clear superblock from all component devices
 	for _, d := range devices {
-		m.executor.Run("mdadm", "--zero-superblock", d)
+		m.executor.Run("mdadm", "--zero-superblock", "-f", d)
 	}
 	return nil
 }
@@ -105,6 +108,54 @@ func (m *MDADMOperator) SetDeviceFaultRAID(dev string, devToFail string) error {
 	return nil
 }
 
+// GrowRAID - Grow RAID array to add more devices
+func (m *MDADMOperator) GrowRAID(dev string, newDevices []string) error {
+	if len(newDevices) == 0 {
+		return nil
+	}
+	// First add the new devices
+	for _, d := range newDevices {
+		_, err := m.executor.Run("mdadm", "--add", dev, d)
+		if err != nil {
+			return fmt.Errorf("failed to add device %s: %v", d, err)
+		}
+	}
+	// Then grow the array
+	_, err := m.executor.Run("mdadm", "--grow", dev, "--raid-devices", "+"+strconv.Itoa(len(newDevices)))
+	if err != nil {
+		return fmt.Errorf("failed to grow RAID: %v", err)
+	}
+	// Wait for reshape to complete
+	m.waitForReshape(dev)
+	return nil
+}
+
+// waitForReshape - Wait for RAID reshape to complete
+func (m *MDADMOperator) waitForReshape(dev string) error {
+	maxRetries := 300 // 5 minutes max
+	retryInterval := time.Second
+	for i := 0; i < maxRetries; i++ {
+		output, err := m.executor.Run("cat", "/proc/mdstat")
+		if err != nil {
+			time.Sleep(retryInterval)
+			continue
+		}
+		// Check if reshape is still in progress
+		deviceName := strings.TrimPrefix(dev, "/dev/md/")
+		if !strings.Contains(output, deviceName) {
+			time.Sleep(retryInterval)
+			continue
+		}
+		// Look for [reshape] or [resync] in the output
+		if strings.Contains(output, deviceName) &&
+			(!strings.Contains(output, "[reshape") && !strings.Contains(output, "[resync")) {
+			return nil
+		}
+		time.Sleep(retryInterval)
+	}
+	return fmt.Errorf("timeout waiting for RAID reshape to complete")
+}
+
 // ListMDDevices - List all MD devices
 func (m *MDADMOperator) ListMDDevices() ([]models.RAIDInfo, error) {
 	output, err := m.executor.Run("mdadm", "--detail", "--scan")
@@ -143,18 +194,66 @@ func (m *MDADMOperator) ListMDDevices() ([]models.RAIDInfo, error) {
 
 // waitForDevice - Wait for device to be ready
 func (m *MDADMOperator) waitForDevice(device string) error {
-	// Simple wait then return
-	return nil
+	// Wait for device to appear with retry
+	maxRetries := 30
+	retryInterval := time.Second
+	for i := 0; i < maxRetries; i++ {
+		if _, err := os.Stat(device); err == nil {
+			// Check if RAID is ready
+			info, err := m.QueryRAID(device)
+			if err == nil && info.State == "active" {
+				return nil
+			}
+		}
+		time.Sleep(retryInterval)
+	}
+	return fmt.Errorf("timeout waiting for device %s to be ready", device)
 }
 
 // getComponentDevices - Get RAID component devices
 func (m *MDADMOperator) getComponentDevices(dev string) []string {
-	_, err := m.QueryRAID(dev)
+	// Try to get component devices from /proc/mdstat
+	output, err := m.executor.Run("cat", "/proc/mdstat")
 	if err != nil {
 		return nil
 	}
-	// Parse from State field
-	return nil
+	// Parse mdstat to find component devices
+	var devices []string
+	lines := strings.Split(output, "\n")
+	var inDevice bool
+	for _, line := range lines {
+		if strings.Contains(line, strings.TrimPrefix(dev, "/dev/md/")) {
+			inDevice = true
+			continue
+		}
+		if inDevice {
+			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+				// Component device line
+				parts := strings.Fields(line)
+				if len(parts) > 0 && strings.HasPrefix(parts[0], "/dev/") {
+					devices = append(devices, parts[0])
+				}
+			} else if strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+	}
+	// If we couldn't parse from mdstat, try using mdadm --detail
+	if len(devices) == 0 {
+		output, err := m.executor.Run("mdadm", "--detail", dev)
+		if err == nil {
+			lines := strings.Split(output, "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "/dev/") {
+					fields := strings.Fields(line)
+					if len(fields) > 0 {
+						devices = append(devices, fields[0])
+					}
+				}
+			}
+		}
+	}
+	return devices
 }
 
 // parseRAIDDetail - Parse RAID detail output
@@ -179,6 +278,20 @@ func (m *MDADMOperator) parseRAIDDetail(output string) (*models.RAIDInfo, error)
 			info.Layout = value
 		case "State":
 			info.State = value
+		case "Raid Level":
+			// Parse RAID level from "raid5", "raid6", etc.
+			levelStr := strings.TrimPrefix(strings.ToLower(value), "raid")
+			level, err := strconv.Atoi(levelStr)
+			if err == nil {
+				info.Level = level
+			}
+		case "Level":
+			// Alternative field name
+			levelStr := strings.TrimPrefix(strings.ToLower(value), "raid")
+			level, err := strconv.Atoi(levelStr)
+			if err == nil {
+				info.Level = level
+			}
 		case "Active Devices":
 			if n, err := strconv.Atoi(value); err == nil {
 				info.ActiveDevices = n
