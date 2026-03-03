@@ -14,6 +14,7 @@ var (
 	warnLogger  *log.Logger
 	errorLogger *log.Logger
 	verbose     bool
+	logLevel    Level
 )
 
 // Level log level
@@ -28,39 +29,56 @@ const (
 
 // Init initializes the logger
 func Init() {
-	verbose = os.Getenv("VERBOSE") == "true"
-
+	logLevel = INFO
 	debugLogger = log.New(os.Stdout, "\033[36m[DEBUG]\033[0m ", log.Ldate|log.Ltime|log.Lshortfile)
 	infoLogger = log.New(os.Stdout, "\033[32m[INFO]\033[0m ", log.Ldate|log.Ltime)
 	warnLogger = log.New(os.Stdout, "\033[33m[WARN]\033[0m ", log.Ldate|log.Ltime)
 	errorLogger = log.New(os.Stderr, "\033[31m[ERROR]\033[0m ", log.Ldate|log.Ltime|log.Lshortfile)
+	verbose = os.Getenv("VERBOSE") == "true"
+	if verbose {
+		logLevel = DEBUG
+	}
 }
 
 // SetVerbose sets verbose mode
 func SetVerbose(v bool) {
 	verbose = v
+	if v {
+		logLevel = DEBUG
+	}
+}
+
+// SetLevel sets the log level
+func SetLevel(level Level) {
+	logLevel = level
 }
 
 // Debug logs debug messages
 func Debug(format string, v ...interface{}) {
-	if verbose {
+	if verbose || logLevel <= DEBUG {
 		debugLogger.Output(2, fmt.Sprintf(format, v...))
 	}
 }
 
 // Info logs info messages
 func Info(format string, v ...interface{}) {
-	infoLogger.Output(2, fmt.Sprintf(format, v...))
+	if logLevel <= INFO {
+		infoLogger.Output(2, fmt.Sprintf(format, v...))
+	}
 }
 
 // Warn logs warning messages
 func Warn(format string, v ...interface{}) {
-	warnLogger.Output(2, fmt.Sprintf(format, v...))
+	if logLevel <= WARN {
+		warnLogger.Output(2, fmt.Sprintf(format, v...))
+	}
 }
 
 // Error logs error messages
 func Error(format string, v ...interface{}) {
-	errorLogger.Output(2, fmt.Sprintf(format, v...))
+	if logLevel <= ERROR {
+		errorLogger.Output(2, fmt.Sprintf(format, v...))
+	}
 }
 
 // Fatal logs fatal errors and exits

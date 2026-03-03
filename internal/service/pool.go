@@ -33,13 +33,11 @@ func (s *PoolService) CreatePool(cfg models.PoolConfig) (*models.Pool, error) {
 	logger.Info("Creating pool: %s", cfg.Name)
 	logger.Info("Mode: %s", cfg.Mode.GetModeDisplay())
 	logger.Info("Disks: %v", cfg.Disks)
-
 	// 1. Collect disk information
 	disks, err := s.collectDiskInfo(cfg.Disks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to collect disk info: %w", err)
 	}
-
 	// 2. Estimate capacity
 	sizes := make([]DiskSizeInfo, len(disks))
 	for i, d := range disks {
@@ -49,16 +47,13 @@ func (s *PoolService) CreatePool(cfg models.PoolConfig) (*models.Pool, error) {
 		}
 	}
 	capacity := s.calc.EstimateCapacity(sizes, cfg.Mode)
-
 	logger.Info("Raw Total: %s", FormatBytes(capacity.TotalRawCapacity))
 	logger.Info("Parity: %s", FormatBytes(capacity.ParityCapacity))
 	logger.Info("Usable: %s", FormatBytes(capacity.UsableCapacity))
 	logger.Info("Redundancy: %s", capacity.ProtectionLevel)
-
 	if capacity.UsableCapacity <= 0 {
 		return nil, fmt.Errorf("insufficient usable capacity to create pool")
 	}
-
 	// 3. Create pool based on mode
 	switch cfg.Mode {
 	case models.ModeSHR1:
@@ -85,6 +80,18 @@ func (s *PoolService) collectDiskInfo(devices []string) ([]models.Disk, error) {
 		disk, err := s.parted.GetDiskInfo(dev)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get disk info %s: %w", dev, err)
+		}
+		// Check if disk is already in use
+		inUse, reason, err := s.parted.IsDiskInUse(dev)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check disk usage for %s: %w", dev, err)
+		}
+		if inUse {
+			return nil, fmt.Errorf("disk %s is already in use: %s", dev, reason)
+		}
+		// Check if disk is read-only
+		if disk.Ro {
+			return nil, fmt.Errorf("disk %s is read-only and cannot be used", dev)
 		}
 		disks = append(disks, *disk)
 	}
@@ -248,24 +255,20 @@ func (s *PoolService) createRAID1Pool(disks []models.Disk, name string) (*models
 	for i, d := range disks {
 		devices[i] = d.Device
 	}
-
 	raidDev, err := s.mdadm.CreateRAID(1, devices, name, true)
 	if err != nil {
 		return nil, err
 	}
-
 	// Create LVM PV
 	err = s.lvm.CreatePV(raidDev)
 	if err != nil {
 		return nil, err
 	}
-
 	vgName := "openhr_" + name
 	err = s.lvm.CreateVG(vgName, []string{raidDev})
 	if err != nil {
 		return nil, err
 	}
-
 	return &models.Pool{
 		ID:        vgName,
 		Name:      name,
@@ -286,30 +289,25 @@ func (s *PoolService) createRAID5Pool(disks []models.Disk, name string) (*models
 	for i, d := range disks {
 		devices[i] = d.Device
 	}
-
 	raidDev, err := s.mdadm.CreateRAID(5, devices, name, true)
 	if err != nil {
 		return nil, err
 	}
-
 	err = s.lvm.CreatePV(raidDev)
 	if err != nil {
 		return nil, err
 	}
-
 	vgName := "openhr_" + name
 	err = s.lvm.CreateVG(vgName, []string{raidDev})
 	if err != nil {
 		return nil, err
 	}
-
 	minSize := disks[0].Size
 	for _, d := range disks {
 		if d.Size < minSize {
 			minSize = d.Size
 		}
 	}
-
 	return &models.Pool{
 		ID:        vgName,
 		Name:      name,
@@ -330,30 +328,25 @@ func (s *PoolService) createRAID6Pool(disks []models.Disk, name string) (*models
 	for i, d := range disks {
 		devices[i] = d.Device
 	}
-
 	raidDev, err := s.mdadm.CreateRAID(6, devices, name, true)
 	if err != nil {
 		return nil, err
 	}
-
 	err = s.lvm.CreatePV(raidDev)
 	if err != nil {
 		return nil, err
 	}
-
 	vgName := "openhr_" + name
 	err = s.lvm.CreateVG(vgName, []string{raidDev})
 	if err != nil {
 		return nil, err
 	}
-
 	minSize := disks[0].Size
 	for _, d := range disks {
 		if d.Size < minSize {
 			minSize = d.Size
 		}
 	}
-
 	return &models.Pool{
 		ID:        vgName,
 		Name:      name,
@@ -373,30 +366,24 @@ func (s *PoolService) createBasicPool(disks []models.Disk, name string) (*models
 	if len(disks) != 1 {
 		return nil, fmt.Errorf("Basic mode can only use 1 disk")
 	}
-
 	disk := disks[0]
-
 	// Create partition
 	err := s.parted.CreatePartition(disk.Device, "primary", "0%", "100%")
 	if err != nil {
 		return nil, err
 	}
-
 	partDev := fmt.Sprintf("%s1", disk.Device)
-
 	// Create LVM PV
 	err = s.lvm.CreatePV(partDev)
 	if err != nil {
 		return nil, err
 	}
-
 	// Create VG
 	vgName := "openhr_" + name
 	err = s.lvm.CreateVG(vgName, []string{partDev})
 	if err != nil {
 		return nil, err
 	}
-
 	return &models.Pool{
 		ID:        vgName,
 		Name:      name,
@@ -414,33 +401,37 @@ func (s *PoolService) createBasicPool(disks []models.Disk, name string) (*models
 // DeletePool deletes a storage pool
 func (s *PoolService) DeletePool(name string) error {
 	vgName := "openhr_" + name
-
 	// Check if VG exists
 	_, err := s.lvm.GetVGInfo(vgName)
 	if err != nil {
 		return fmt.Errorf("pool does not exist: %s", name)
 	}
-
 	// Get all PVs in this VG
 	pvs, err := s.lvm.ListPVs()
 	if err != nil {
 		return fmt.Errorf("failed to list PVs: %w", err)
 	}
-
-	// Collect all MD devices before removing VG
+	// Collect all MD devices and component devices before removing VG
 	var mdDevices []string
+	var componentDevices []string
 	for _, pv := range pvs {
-		if pv.VGName == vgName && strings.HasPrefix(pv.Name, "/dev/md/") {
-			mdDevices = append(mdDevices, pv.Name)
+		if pv.VGName == vgName {
+			if strings.HasPrefix(pv.Name, "/dev/md/") {
+				mdDevices = append(mdDevices, pv.Name)
+				// Get component devices from RAID
+				comps := s.mdadm.GetComponentDevices(pv.Name)
+				componentDevices = append(componentDevices, comps...)
+			} else {
+				// Non-RAID device (e.g., partition)
+				componentDevices = append(componentDevices, pv.Name)
+			}
 		}
 	}
-
 	// Remove VG first (this releases the PVs)
 	err = s.lvm.RemoveVG(vgName)
 	if err != nil {
 		return fmt.Errorf("failed to remove VG: %w", err)
 	}
-
 	// Stop and clean up RAID arrays
 	for _, mdDev := range mdDevices {
 		logger.Info("Cleaning up RAID array: %s", mdDev)
@@ -448,7 +439,45 @@ func (s *PoolService) DeletePool(name string) error {
 			logger.Warn("Failed to clean up RAID %s: %v", mdDev, err)
 		}
 	}
+	// Clean up partitions on component devices
+	diskPartitions := make(map[string][]int)
+	for _, dev := range componentDevices {
+		// Extract disk name (e.g., /dev/sda1 -> /dev/sda)
+		diskDev := dev
+		partNum := 0
+		if len(dev) > len("/dev/sd") {
+			// Try to parse partition number
+			for i := len(dev) - 1; i >= len("/dev/sd"); i-- {
+				if dev[i] >= '0' && dev[i] <= '9' {
+					partNum = partNum*10 + int(dev[i]-'0')
+				} else {
+					break
+				}
+			}
+			// Reverse the number
+			newPartNum := 0
+			for tmp := partNum; tmp > 0; tmp /= 10 {
+				newPartNum = newPartNum*10 + tmp%10
+			}
+			partNum = newPartNum
 
+			if partNum > 0 {
+				diskDev = dev[:len(dev)-len(fmt.Sprintf("%d", partNum))]
+			}
+		}
+		if partNum > 0 {
+			diskPartitions[diskDev] = append(diskPartitions[diskDev], partNum)
+		}
+	}
+	// Remove PV signatures from partitions
+	for _, pv := range pvs {
+		if pv.VGName == vgName {
+			logger.Info("Removing PV signature from: %s", pv.Name)
+			if err := s.lvm.RemovePV(pv.Name); err != nil {
+				logger.Warn("Failed to remove PV %s: %v", pv.Name, err)
+			}
+		}
+	}
 	logger.Info("[OK] Pool deleted: %s", name)
 	return nil
 }
@@ -459,14 +488,12 @@ func (s *PoolService) ListPools() ([]*models.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	var pools []*models.Pool
 	for _, vg := range vgs {
 		// Only list VGs starting with openhr_
 		if !strings.HasPrefix(vg.Name, "openhr_") {
 			continue
 		}
-
 		pool := &models.Pool{
 			ID:        vg.Name,
 			Name:      strings.TrimPrefix(vg.Name, "openhr_"),
@@ -479,19 +506,16 @@ func (s *PoolService) ListPools() ([]*models.Pool, error) {
 		}
 		pools = append(pools, pool)
 	}
-
 	return pools, nil
 }
 
 // GetPool gets pool details
 func (s *PoolService) GetPool(name string) (*models.Pool, error) {
 	vgName := "openhr_" + name
-
 	vginfo, err := s.lvm.GetVGInfo(vgName)
 	if err != nil {
 		return nil, fmt.Errorf("pool does not exist: %s", name)
 	}
-
 	return &models.Pool{
 		ID:        vgName,
 		Name:      name,
@@ -568,7 +592,6 @@ func (s *PoolService) GetPoolByVGName(vgName string) (*models.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	return &models.Pool{
 		ID:        vgName,
 		Name:      strings.TrimPrefix(vgName, "openhr_"),
@@ -582,7 +605,23 @@ func (s *PoolService) GetPoolByVGName(vgName string) (*models.Pool, error) {
 }
 
 // GetPoolDevices gets devices in the pool (internal use)
-func GetPoolDevices(dev string) []string {
-	// Simplified implementation
-	return nil
+func (s *PoolService) GetPoolDevices(poolName string) ([]string, error) {
+	vgName := "openhr_" + poolName
+	// Get VG info to verify pool exists
+	_, err := s.lvm.GetVGInfo(vgName)
+	if err != nil {
+		return nil, fmt.Errorf("pool does not exist: %s", poolName)
+	}
+	// Get all PVs in this VG
+	pvs, err := s.lvm.ListPVs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PVs: %w", err)
+	}
+	var devices []string
+	for _, pv := range pvs {
+		if pv.VGName == vgName {
+			devices = append(devices, pv.Name)
+		}
+	}
+	return devices, nil
 }

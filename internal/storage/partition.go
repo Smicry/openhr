@@ -204,6 +204,35 @@ func (p *PartitionOperator) IsMounted(dev string) bool {
 	return strings.Contains(output, dev)
 }
 
+// IsDiskInUse checks if the disk is in use by any storage subsystem
+func (p *PartitionOperator) IsDiskInUse(dev string) (bool, string, error) {
+	// Check if disk has existing partitions
+	parts, err := p.ListPartitions(dev)
+	if err == nil && len(parts) > 0 {
+		return true, "disk has existing partitions", nil
+	}
+	// Check if disk is mounted
+	if p.IsMounted(dev) {
+		return true, "disk is mounted", nil
+	}
+	// Check if disk is part of an MD RAID
+	output, err := p.executor.Run("mdadm", "--examine", dev)
+	if err == nil && strings.Contains(output, "MD metadata") {
+		return true, "disk is part of a RAID array", nil
+	}
+	// Check if disk/partition is used by LVM
+	output, err = p.executor.Run("lvm", "pvcheck", "-e", dev)
+	if err == nil {
+		return true, "disk is used by LVM", nil
+	}
+	// Alternative check: pvs
+	pvs, err := p.executor.Run("lvm", "pvs", "--unquoted")
+	if err == nil && strings.Contains(pvs, dev) {
+		return true, "disk is used by LVM", nil
+	}
+	return false, "", nil
+}
+
 // GetMountPoint - Get mount point
 func (p *PartitionOperator) GetMountPoint(dev string) string {
 	output, err := p.executor.Run("findmnt", "-n", "-o", "TARGET", "-S", dev)
