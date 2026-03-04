@@ -2,10 +2,8 @@ package storage
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/openhr/internal/models"
 )
@@ -50,14 +48,6 @@ func (m *MDADMOperator) CreateRAID(level int, devices []string, name string, bit
 	output, err := m.executor.Run("mdadm", args...)
 	if err != nil {
 		return "", fmt.Errorf("failed to create RAID: %v, output: %s", err, output)
-	}
-	// Wait for device to be ready
-	if err := m.waitForDevice(device); err != nil {
-		return "", err
-	}
-	// Wait for RAID sync to complete (background resync)
-	if err := m.waitForSync(device); err != nil {
-		return "", err
 	}
 	return device, nil
 }
@@ -131,35 +121,7 @@ func (m *MDADMOperator) GrowRAID(dev string, newDevices []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to grow RAID: %v", err)
 	}
-	// Wait for reshape to complete
-	m.waitForReshape(dev)
 	return nil
-}
-
-// waitForReshape - Wait for RAID reshape to complete
-func (m *MDADMOperator) waitForReshape(dev string) error {
-	maxRetries := 300 // 5 minutes max
-	retryInterval := time.Second
-	for i := 0; i < maxRetries; i++ {
-		output, err := m.executor.Run("cat", "/proc/mdstat")
-		if err != nil {
-			time.Sleep(retryInterval)
-			continue
-		}
-		// Check if reshape is still in progress
-		deviceName := strings.TrimPrefix(dev, "/dev/md/")
-		if !strings.Contains(output, deviceName) {
-			time.Sleep(retryInterval)
-			continue
-		}
-		// Look for [reshape] or [resync] in the output
-		if strings.Contains(output, deviceName) &&
-			(!strings.Contains(output, "[reshape") && !strings.Contains(output, "[resync")) {
-			return nil
-		}
-		time.Sleep(retryInterval)
-	}
-	return fmt.Errorf("timeout waiting for RAID reshape to complete")
 }
 
 // ListMDDevices - List all MD devices
@@ -195,69 +157,6 @@ func (m *MDADMOperator) ListMDDevices() ([]models.RAIDInfo, error) {
 		}
 	}
 	return devices, nil
-}
-
-// waitForDevice - Wait for device to be ready
-func (m *MDADMOperator) waitForDevice(device string) error {
-	// Wait for device to appear with retry
-	maxRetries := 30
-	retryInterval := time.Second
-	for i := 0; i < maxRetries; i++ {
-		if _, err := os.Stat(device); err == nil {
-			// Check if RAID is ready
-			info, err := m.QueryRAID(device)
-			if err == nil && info.State == "active" {
-				return nil
-			}
-		}
-		time.Sleep(retryInterval)
-	}
-	return fmt.Errorf("timeout waiting for device %s to be ready", device)
-}
-
-// waitForSync - Wait for RAID sync/resync to complete
-func (m *MDADMOperator) waitForSync(device string) error {
-	maxRetries := 300 // 5 minutes max
-	retryInterval := time.Second
-	deviceName := strings.TrimPrefix(device, "/dev/md/")
-	for i := 0; i < maxRetries; i++ {
-		output, err := m.executor.Run("cat", "/proc/mdstat")
-		if err != nil {
-			time.Sleep(retryInterval)
-			continue
-		}
-		// Check if device exists in mdstat
-		if !strings.Contains(output, deviceName) {
-			// Device not found, might be already clean
-			return nil
-		}
-		// Check for active sync/resync/reshape operations
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, deviceName) {
-				// Check if there's any sync activity
-				if strings.Contains(line, "[") &&
-					(strings.Contains(line, "resync") ||
-						strings.Contains(line, "recovery") ||
-						strings.Contains(line, "reshape") ||
-						strings.Contains(line, "check")) {
-					time.Sleep(retryInterval)
-					continue
-				}
-			}
-		}
-		// Also check /proc/mdstat for overall sync status
-		info, err := m.QueryRAID(device)
-		if err == nil {
-			// Check if RAID is clean (no degraded, no activity)
-			if strings.Contains(strings.ToLower(info.State), "clean") ||
-				!strings.Contains(strings.ToLower(info.State), "degraded") {
-				return nil
-			}
-		}
-		time.Sleep(retryInterval)
-	}
-	return fmt.Errorf("timeout waiting for RAID %s sync to complete", device)
 }
 
 // GetComponentDevices - Get RAID component devices (exported)
